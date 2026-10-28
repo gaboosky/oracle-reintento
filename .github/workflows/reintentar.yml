@@ -1,0 +1,91 @@
+# Reintenta crear el servidor gratis de LiciGest en Oracle Cloud cada ~10 minutos, sin depender de
+# tener una pestaña abierta. Va en el repositorio de GitHub en: .github/workflows/reintentar.yml
+# Necesita estos secretos (Settings -> Secrets and variables -> Actions):
+#   OCI_USER, OCI_FINGERPRINT, OCI_TENANCY, OCI_KEY (contenido del .pem), SSH_PUB (contenido del .pub),
+#   OCI_SUBNET, OCI_IMAGE
+# Cuando consigue el servidor, la ejecución termina "con error" a propósito para que GitHub te mande un
+# correo. Después de eso, desactiva el flujo (Actions -> Reintentar servidor Oracle -> ... -> Disable).
+name: Reintentar servidor Oracle
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: oracle
+  cancel-in-progress: false
+
+jobs:
+  intentar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
+      AD: 'jjXw:SA-SANTIAGO-1-AD-1'
+    steps:
+      - name: Instalar la herramienta de Oracle
+        run: pip install --quiet oci-cli
+
+      - name: Configurar acceso
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          SSH_PUB: ${{ secrets.SSH_PUB }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          printf '%s\n' "$SSH_PUB" > ~/.oci/ssh.pub
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY
+          region=sa-santiago-1
+          key_file=$HOME/.oci/key.pem
+          EOF
+          sed -i 's/^ *//' ~/.oci/config
+
+      - name: Intentar crear el servidor
+        env:
+          COMP: ${{ secrets.OCI_TENANCY }}
+          SUBNET: ${{ secrets.OCI_SUBNET }}
+          IMG: ${{ secrets.OCI_IMAGE }}
+        run: |
+          # ¿Ya existe? (para no crear dos)
+          YA=$(oci compute instance list -c "$COMP" --display-name licigest --all \
+                 --query 'length(data[?"lifecycle-state"!=`TERMINATED` && "lifecycle-state"!=`TERMINATING`])' \
+                 --raw-output 2>/dev/null || echo error)
+          if [ "$YA" = "error" ]; then
+            echo "No pude consultar Oracle: revisa los secretos OCI_USER, OCI_FINGERPRINT, OCI_TENANCY y OCI_KEY."
+            exit 1
+          fi
+          if [ "$YA" != "0" ]; then
+            echo "El servidor licigest ya existe. Puedes desactivar este flujo."
+            exit 0
+          fi
+          for CFG in '{"ocpus":2,"memoryInGBs":12}' '{"ocpus":1,"memoryInGBs":6}'; do
+            SALIDA=$(oci compute instance launch -c "$COMP" --availability-domain "$AD" \
+              --shape VM.Standard.A1.Flex --shape-config "$CFG" --image-id "$IMG" --subnet-id "$SUBNET" \
+              --assign-public-ip true --display-name licigest --boot-volume-size-in-gbs 100 \
+              --ssh-authorized-keys-file ~/.oci/ssh.pub 2>&1 || true)
+            if echo "$SALIDA" | grep -q '"lifecycle-state"'; then
+              echo "=============================================="
+              echo " ¡SERVIDOR CREADO! ($CFG)"
+              echo " Entra a Oracle -> Instancias -> licigest y copia la IP pública."
+              echo "=============================================="
+              exit 1   # a propósito: así GitHub te avisa por correo
+            elif echo "$SALIDA" | grep -qi 'capacity'; then
+              echo "$CFG: sin capacidad todavía"
+            elif echo "$SALIDA" | grep -qi 'TooManyRequests'; then
+              echo "$CFG: Oracle pide ir más lento; se reintenta en la próxima ejecución"
+              exit 0
+            else
+              echo "$CFG: respuesta inesperada (primeras líneas):"
+              echo "$SALIDA" | grep -iE '"code"|"message"|Error' | head -5
+            fi
+            sleep 20
+          done
