@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 8
     env:
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
+      SUPPRESS_LABEL_WARNING: 'True'
       AD: 'jjXw:SA-SANTIAGO-1-AD-1'
     steps:
       - name: Instalar la herramienta de Oracle
@@ -54,7 +55,12 @@ jobs:
           [ -n "$(limpio "$OCI_FINGERPRINT")" ] && echo "  OCI_FINGERPRINT: ok" || echo "  OCI_FINGERPRINT: VACÍO"
           [ -n "$(limpio "$OCI_TENANCY")" ] && echo "  OCI_TENANCY: ok" || echo "  OCI_TENANCY: VACÍO"
           head -1 ~/.oci/key.pem | grep -q 'BEGIN' && echo "  OCI_KEY: ok" || echo "  OCI_KEY: no empieza con -----BEGIN ... PRIVATE KEY-----"
-          grep -q '^ssh-' ~/.oci/ssh.pub && echo "  SSH_PUB: ok" || echo "  SSH_PUB: no empieza con ssh-rsa"
+          if grep -q 'BEGIN PUBLIC KEY' ~/.oci/ssh.pub; then
+            # Viene en formato PEM: se convierte al formato que pide Oracle para entrar por SSH
+            ssh-keygen -i -m PKCS8 -f ~/.oci/ssh.pub > ~/.oci/ssh_conv.pub && mv ~/.oci/ssh_conv.pub ~/.oci/ssh.pub
+          fi
+          if grep -q '^ssh-' ~/.oci/ssh.pub; then echo "  SSH_PUB: ok"
+          else echo "  SSH_PUB: NO SIRVE. Empieza con: $(head -c 30 ~/.oci/ssh.pub)"; exit 1; fi
 
       - name: Intentar crear el servidor
         env:
@@ -75,8 +81,9 @@ jobs:
             grep -v '^[[:space:]]*$' /tmp/err | head -8
             exit 1
           fi
+          [ -z "$YA" ] && YA=0   # si no hay ningún servidor, Oracle responde vacío
           case "$YA" in
-            ''|*[!0-9]*)
+            *[!0-9]*)
               echo "Respuesta rara al buscar el servidor: $YA"
               grep -v '^[[:space:]]*$' /tmp/err | head -8
               exit 1 ;;
