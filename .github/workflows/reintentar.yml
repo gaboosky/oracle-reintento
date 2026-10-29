@@ -1,5 +1,6 @@
-# Reintenta crear el servidor gratis de LiciGest en Oracle Cloud cada ~10 minutos, sin depender de
-# tener una pestaña abierta. Va en el repositorio de GitHub en: .github/workflows/reintentar.yml
+# Reintenta crear el servidor gratis de LiciGest en Oracle Cloud sin parar, sin depender de tener una
+# pestaña abierta. GitHub atrasa mucho las ejecuciones programadas, así que cada ejecución se queda
+# reintentando por casi 6 horas (cada ~3 minutos) y se programa una nueva cada 2 horas por si acaso. Va en el repositorio de GitHub en: .github/workflows/reintentar.yml
 # Necesita estos secretos (Settings -> Secrets and variables -> Actions):
 #   OCI_USER, OCI_FINGERPRINT, OCI_TENANCY, OCI_KEY (contenido del .pem), SSH_PUB (contenido del .pub),
 #   OCI_SUBNET, OCI_IMAGE
@@ -9,7 +10,7 @@ name: Reintentar servidor Oracle
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '17 */2 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   intentar:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 355
     env:
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
       SUPPRESS_LABEL_WARNING: 'True'
@@ -93,6 +94,10 @@ jobs:
             exit 0
           fi
 
+          INICIO=$(date +%s)
+          VUELTA=0
+          while [ $(( $(date +%s) - INICIO )) -lt 20400 ]; do   # unas 5 h 40 min
+          VUELTA=$((VUELTA + 1))
           for CFG in '{"ocpus":2,"memoryInGBs":12}' '{"ocpus":1,"memoryInGBs":6}'; do
             SALIDA=$(oci compute instance launch -c "$COMP" --availability-domain "$AD" \
               --shape VM.Standard.A1.Flex --shape-config "$CFG" --image-id "$IMG" --subnet-id "$SUBNET" \
@@ -105,13 +110,16 @@ jobs:
               echo "=============================================="
               exit 1   # a propósito: así GitHub te avisa por correo
             elif echo "$SALIDA" | grep -qi 'capacity'; then
-              echo "$CFG: sin capacidad todavía"
+              echo "$(TZ=America/Santiago date '+%d/%m %H:%M') vuelta $VUELTA $CFG: sin capacidad todavía"
             elif echo "$SALIDA" | grep -qi 'TooManyRequests'; then
-              echo "$CFG: Oracle pide ir más lento; se reintenta en la próxima ejecución"
-              exit 0
+              echo "$(TZ=America/Santiago date '+%d/%m %H:%M') Oracle pide ir más lento; espero 5 minutos"
+              sleep 300
             else
               echo "$CFG: respuesta inesperada:"
               echo "$SALIDA" | grep -iE '"code"|"message"|Error' | head -6
             fi
             sleep 20
           done
+          sleep 60
+          done
+          echo "Fin de esta ronda sin capacidad; la siguiente ejecución programada sigue intentando."
